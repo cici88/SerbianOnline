@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { sendEmailNotification } from "@/lib/email";
 import { LogOut, User, Loader2, Calendar, Clock } from "lucide-react";
 
 export default function Dashboard() {
@@ -31,8 +32,8 @@ export default function Dashboard() {
     const { data, error } = await supabase
       .from('bookings')
       .select('*')
-      .eq('user_id', userId)
-      .eq('status', 'scheduled')
+      .eq('student_id', userId)
+      .in('status', ['scheduled', 'pending'])
       .gte('starts_at', new Date().toISOString())
       .order('starts_at', { ascending: true })
       .limit(3);
@@ -51,6 +52,25 @@ export default function Dashboard() {
     
     if (confirm("Are you sure you want to cancel this class?")) {
       await supabase.from('bookings').update({ status: 'canceled' }).eq('id', bookingId);
+      
+      // Send email notifications
+      const dateStr = new Date(startsAt).toLocaleDateString();
+      const timeStr = new Date(startsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      
+      // To Student
+      sendEmailNotification(
+        user.email,
+        "Class Canceled",
+        `<h1>Class Canceled</h1><p>You have canceled your class scheduled for ${dateStr} at ${timeStr}.</p>`
+      );
+      
+      // To Admin
+      sendEmailNotification(
+        "admin@example.com", // Replace with real admin email or fetch from DB
+        "Class Canceled by Student",
+        `<h1>Class Canceled</h1><p>A student (${user.email}) has canceled their class scheduled for ${dateStr} at ${timeStr}.</p>`
+      );
+      
       fetchUpcomingClasses(user.id);
     }
   };
@@ -144,6 +164,12 @@ export default function Dashboard() {
                         <p className="text-sm font-medium text-slate-500">
                           {new Date(booking.starts_at).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} at {new Date(booking.starts_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                         </p>
+                        {booking.video_link && (
+                          <a href={booking.video_link} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm font-bold text-purple-600 hover:text-purple-800 hover:underline">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-video"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>
+                            Join Video Call
+                          </a>
+                        )}
                       </div>
                       <div className="flex flex-col items-end gap-2">
                         <div className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700">

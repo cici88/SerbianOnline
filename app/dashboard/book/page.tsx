@@ -1,407 +1,467 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { motion, AnimatePresence } from "motion/react";
-import { Calendar as CalendarIcon, Clock, ArrowLeft, CheckCircle2, Zap, CreditCard, ChevronRight, Loader2, AlertCircle } from "lucide-react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
+import { sendEmailNotification } from "@/lib/email";
+import { ArrowLeft, Calendar, Clock, CheckCircle2, Loader2, CreditCard } from "lucide-react";
 import { PayPalScriptProvider, PayPalButtons } from "@paypal/react-paypal-js";
 
-// Privremeni podaci za UI
-const classTypes = [
-  { id: "trial", name: "15-Min Meet & Greet", duration: 15, price: 0, currency: "EUR", icon: <Zap className="h-6 w-6 text-emerald-500" />, color: "border-emerald-200 bg-emerald-50 hover:border-emerald-500" },
-  { id: "intro", name: "30-Min Intro Class", duration: 30, price: 1.7, currency: "EUR", icon: <Clock className="h-6 w-6 text-purple-500" />, color: "border-purple-200 bg-purple-50 hover:border-purple-500", note: "~200 RSD" },
-  { id: "30min", name: "30-Min Practice", duration: 30, price: 5, currency: "EUR", icon: <Clock className="h-6 w-6 text-slate-500" />, color: "border-slate-200 bg-white hover:border-purple-500" },
-  { id: "45min", name: "45-Min Balanced", duration: 45, price: 8, currency: "EUR", icon: <Clock className="h-6 w-6 text-slate-500" />, color: "border-slate-200 bg-white hover:border-purple-500" },
-  { id: "60min", name: "60-Min Immersion", duration: 60, price: 10, currency: "EUR", icon: <Clock className="h-6 w-6 text-slate-500" />, color: "border-purple-600 bg-white hover:border-purple-700 shadow-md", popular: true },
-];
-
-const availableTimes = ["09:00", "10:30", "13:00", "15:45", "18:00", "19:30"];
-
-export default function BookClass() {
+export default function BookClassPage() {
   const router = useRouter();
   const [user, setUser] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  
+  const [products, setProducts] = useState<any[]>([]);
+  const [weeklyAvailability, setWeeklyAvailability] = useState<any[]>([]);
+  const [blockedTimes, setBlockedTimes] = useState<any[]>([]);
+  const [bookings, setBookings] = useState<any[]>([]);
+  
   const [step, setStep] = useState(1);
   const [selectedClass, setSelectedClass] = useState<any>(null);
-  const [selectedDate, setSelectedDate] = useState<number | null>(null);
+  const [selectedDateIndex, setSelectedDateIndex] = useState<number | null>(null);
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [isBooking, setIsBooking] = useState(false);
+  const [bookingSuccess, setBookingSuccess] = useState(false);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) {
-        setUser(session.user);
-      } else {
+    const init = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
         router.push("/login");
+        return;
       }
-    });
+      setUser(session.user);
+
+      // Fetch products, availability, blocked times, and bookings
+      const [productsRes, availRes, blockedRes, bookingsRes] = await Promise.all([
+        supabase.from('products').select('*').order('duration_min', { ascending: true }),
+        supabase.from('weekly_availability').select('*'),
+        supabase.from('blocked_times').select('*').gte('ends_at', new Date().toISOString()),
+        supabase.from('bookings').select('*').in('status', ['scheduled', 'pending']).gte('ends_at', new Date().toISOString())
+      ]);
+
+      if (productsRes.data) setProducts(productsRes.data);
+      if (availRes.data) setWeeklyAvailability(availRes.data);
+      if (blockedRes.data) setBlockedTimes(blockedRes.data);
+      if (bookingsRes.data) setBookings(bookingsRes.data);
+
+      setLoading(false);
+    };
+
+    init();
   }, [router]);
 
-  // Generisanje sledećih 7 dana za kalendar
+  // Generate next 14 days
   const getNextDays = () => {
     const days = [];
-    for (let i = 1; i <= 7; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() + i);
+    const today = new Date();
+    for (let i = 1; i <= 14; i++) {
+      const nextDay = new Date(today);
+      nextDay.setDate(today.getDate() + i);
       days.push({
-        dayName: d.toLocaleDateString('en-US', { weekday: 'short' }),
-        dateNum: d.getDate(),
-        fullDate: d,
+        date: nextDay.getDate(),
+        day: nextDay.toLocaleDateString('en-US', { weekday: 'short' }),
+        fullDate: nextDay
       });
     }
     return days;
   };
 
-  const handleNext = () => {
-    if (step < 3) setStep(step + 1);
+  const getAvailableTimesForDate = (dateIndex: number) => {
+    if (!selectedClass) return [];
+    const day = getNextDays()[dateIndex];
+    const dayOfWeek = day.fullDate.getDay();
+    
+    // Get all active blocks for this day
+    const dayBlocks = weeklyAvailability.filter(d => d.day_of_week === dayOfWeek && d.is_active);
+    
+    if (dayBlocks.length === 0) return [];
+
+    const year = day.fullDate.getFullYear();
+    const month = day.fullDate.getMonth();
+    const dateNum = day.fullDate.getDate();
+    const now = new Date();
+
+    const available: string[] = [];
+
+    dayBlocks.forEach(block => {
+      const [startH, startM] = block.start_time.split(':').map(Number);
+      const [endH, endM] = block.end_time.split(':').map(Number);
+      
+      let current = new Date(year, month, dateNum, startH, startM);
+      const endOfDay = new Date(year, month, dateNum, endH, endM);
+
+      while (current < endOfDay) {
+        const slotStart = new Date(current);
+        const slotEnd = new Date(current.getTime() + selectedClass.duration_min * 60000);
+
+        if (slotEnd <= endOfDay && slotStart > now) {
+          // Check overlaps
+          const isOverlapping = bookings.some(b => {
+            const bStart = new Date(b.starts_at);
+            const bEnd = new Date(b.ends_at);
+            return (slotStart < bEnd && slotEnd > bStart);
+          }) || blockedTimes.some(b => {
+            const bStart = new Date(b.starts_at);
+            const bEnd = new Date(b.ends_at);
+            return (slotStart < bEnd && slotEnd > bStart);
+          });
+
+          if (!isOverlapping) {
+            const timeStr = slotStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+            if (!available.includes(timeStr)) {
+              available.push(timeStr);
+            }
+          }
+        }
+        // Increment by 15 mins for the next possible start time
+        current = new Date(current.getTime() + 15 * 60000);
+      }
+    });
+
+    // Sort times just in case blocks are out of order
+    return available.sort();
   };
 
-  const handleBack = () => {
-    if (step > 1) setStep(step - 1);
-    else router.push("/dashboard");
-  };
+  const handleBookFreeClass = async () => {
+    if (!selectedClass || selectedDateIndex === null || !selectedTime || !user) return;
+    setIsBooking(true);
 
-  const calculateDates = () => {
-    const day = getNextDays()[selectedDate!];
-    const [hours, minutes] = selectedTime!.split(':');
-    const startsAt = new Date(day.fullDate);
-    startsAt.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+    const date = getNextDays()[selectedDateIndex].fullDate;
+    const [hours, minutes] = selectedTime.split(':').map(Number);
+    date.setHours(hours, minutes, 0, 0);
 
-    const endsAt = new Date(startsAt);
-    endsAt.setMinutes(endsAt.getMinutes() + selectedClass.duration);
+    const endsAt = new Date(date.getTime() + selectedClass.duration_min * 60000);
 
-    return { startsAt, endsAt };
-  };
+    const { error } = await supabase.from('bookings').insert({
+      student_id: user.id,
+      student_email: user.email,
+      product_id: selectedClass.id,
+      starts_at: date.toISOString(),
+      ends_at: endsAt.toISOString(),
+      status: 'pending',
+      type: `${selectedClass.duration_min}min`
+    });
 
-  const handleConfirmFreeBooking = async () => {
-    if (!user) return;
-    setIsSubmitting(true);
-    setError(null);
-
-    try {
-      const { startsAt, endsAt } = calculateDates();
-
-      const { error: bookingError } = await supabase.from('bookings').insert({
-        user_id: user.id,
-        starts_at: startsAt.toISOString(),
-        ends_at: endsAt.toISOString(),
-        type: selectedClass.id,
-        status: 'scheduled',
-        price_paid: 0,
-        currency: 'EUR'
-      });
-
-      if (bookingError) throw bookingError;
-
-      setStep(4);
-    } catch (err: any) {
-      console.error(err);
-      setError(err.message || "Failed to book class. Please try again.");
-    } finally {
-      setIsSubmitting(false);
+    setIsBooking(false);
+    if (!error) {
+      setBookingSuccess(true);
+      
+      // Send email notifications
+      const dateStr = date.toLocaleDateString();
+      const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      
+      // To Student
+      sendEmailNotification(
+        user.email,
+        "Class Booked Successfully",
+        `<h1>Booking Confirmed</h1><p>You have successfully booked a ${selectedClass.name} class on ${dateStr} at ${timeStr}.</p>`
+      );
+      
+      // To Admin
+      sendEmailNotification(
+        "admin@example.com", // Replace with real admin email or fetch from DB
+        "New Class Booked",
+        `<h1>New Booking</h1><p>A student (${user.email}) has booked a ${selectedClass.name} class on ${dateStr} at ${timeStr}.</p>`
+      );
+      
+    } else {
+      alert("Failed to book class. Please try again.");
     }
   };
 
   const handlePayPalApprove = async (data: any, actions: any) => {
-    if (!user) return;
-    setIsSubmitting(true);
-    setError(null);
+    return actions.order.capture().then(async (details: any) => {
+      if (!selectedClass || selectedDateIndex === null || !selectedTime || !user) return;
+      setIsBooking(true);
 
-    try {
-      const order = await actions.order.capture();
-      const { startsAt, endsAt } = calculateDates();
+      const date = getNextDays()[selectedDateIndex].fullDate;
+      const [hours, minutes] = selectedTime.split(':').map(Number);
+      date.setHours(hours, minutes, 0, 0);
 
-      // Save Booking
-      const { error: bookingError } = await supabase.from('bookings').insert({
-        user_id: user.id,
-        starts_at: startsAt.toISOString(),
+      const endsAt = new Date(date.getTime() + selectedClass.duration_min * 60000);
+
+      // Create booking
+      const { data: bookingData, error: bookingError } = await supabase.from('bookings').insert({
+        student_id: user.id,
+        student_email: user.email,
+        product_id: selectedClass.id,
+        starts_at: date.toISOString(),
         ends_at: endsAt.toISOString(),
-        type: selectedClass.id,
-        status: 'scheduled',
-        price_paid: selectedClass.price,
-        currency: selectedClass.currency
-      });
+        status: 'pending',
+        type: `${selectedClass.duration_min}min`
+      }).select().single();
 
-      if (bookingError) throw bookingError;
-
-      // Save Payment Record
-      const { error: paymentError } = await supabase.from('payments').insert({
-        user_id: user.id,
-        paypal_order_id: order.id,
-        amount: selectedClass.price,
-        currency: selectedClass.currency,
-        status: 'completed'
-      });
-
-      if (paymentError) throw paymentError;
-
-      setStep(4);
-    } catch (err: any) {
-      console.error(err);
-      setError("Payment was successful, but there was an error saving your booking. Please contact support.");
-    } finally {
-      setIsSubmitting(false);
-    }
+      if (!bookingError && bookingData) {
+        // Record payment
+        await supabase.from('payments').insert({
+          booking_id: bookingData.id,
+          student_id: user.id,
+          amount: selectedClass.price,
+          currency: 'EUR',
+          status: 'completed',
+          provider_transaction_id: details.id
+        });
+        setBookingSuccess(true);
+        
+        // Send email notifications
+        const dateStr = date.toLocaleDateString();
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        
+        // To Student
+        sendEmailNotification(
+          user.email,
+          "Class Booked Successfully",
+          `<h1>Booking Confirmed</h1><p>You have successfully booked a ${selectedClass.name} class on ${dateStr} at ${timeStr}.</p>`
+        );
+        
+        // To Admin
+        sendEmailNotification(
+          "admin@example.com", // Replace with real admin email or fetch from DB
+          "New Class Booked",
+          `<h1>New Booking</h1><p>A student (${user.email}) has booked a ${selectedClass.name} class on ${dateStr} at ${timeStr}.</p>`
+        );
+      } else {
+        alert("Payment successful but booking failed. Please contact support.");
+      }
+      setIsBooking(false);
+    });
   };
 
-  if (!user) return null;
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50">
+        <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
+      </div>
+    );
+  }
+
+  if (bookingSuccess) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-center font-sans">
+        <div className="mb-6 flex h-24 w-24 items-center justify-center rounded-full bg-emerald-100 text-emerald-600">
+          <CheckCircle2 className="h-12 w-12" />
+        </div>
+        <h1 className="mb-2 text-3xl font-extrabold text-slate-900">Class Booked!</h1>
+        <p className="mb-8 max-w-md font-medium text-slate-500">
+          Your {selectedClass?.duration_min}-minute class has been successfully scheduled. You can view or manage it from your dashboard.
+        </p>
+        <Link href="/dashboard" className="rounded-xl bg-purple-600 px-8 py-4 font-bold text-white transition-all hover:bg-purple-700">
+          Go to Dashboard
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-purple-100">
-      {/* Header */}
       <header className="sticky top-0 z-10 border-b-2 border-slate-200 bg-white px-6 py-4">
         <div className="mx-auto flex max-w-3xl items-center justify-between">
-          {step < 4 && (
-            <button onClick={handleBack} className="flex items-center gap-2 font-bold text-slate-500 hover:text-purple-600">
-              <ArrowLeft className="h-5 w-5" /> Back
-            </button>
-          )}
-          {step === 4 && (
-            <Link href="/dashboard" className="flex items-center gap-2 font-bold text-slate-500 hover:text-purple-600">
-              <ArrowLeft className="h-5 w-5" /> Back to Dashboard
-            </Link>
-          )}
-          {step < 4 && (
-            <div className="flex items-center gap-2">
-              <div className={`h-2.5 w-8 rounded-full ${step >= 1 ? 'bg-purple-600' : 'bg-slate-200'}`} />
-              <div className={`h-2.5 w-8 rounded-full ${step >= 2 ? 'bg-purple-600' : 'bg-slate-200'}`} />
-              <div className={`h-2.5 w-8 rounded-full ${step >= 3 ? 'bg-purple-600' : 'bg-slate-200'}`} />
-            </div>
-          )}
+          <Link href="/dashboard" className="flex items-center gap-2 font-bold text-slate-500 hover:text-purple-600">
+            <ArrowLeft className="h-5 w-5" /> Back
+          </Link>
+          <div className="flex items-center gap-2 font-bold text-slate-300">
+            <span className={step >= 1 ? "text-purple-600" : ""}>1. Class</span>
+            <span>/</span>
+            <span className={step >= 2 ? "text-purple-600" : ""}>2. Time</span>
+            <span>/</span>
+            <span className={step >= 3 ? "text-purple-600" : ""}>3. Pay</span>
+          </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-3xl px-6 py-12">
-        <AnimatePresence mode="wait">
-          {/* STEP 1: Select Class */}
-          {step === 1 && (
-            <motion.div
-              key="step1"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="flex flex-col gap-6"
-            >
-              <div>
-                <h1 className="text-3xl font-extrabold text-slate-900">Choose a class</h1>
-                <p className="mt-2 font-medium text-slate-500">Select the duration and type of your next lesson.</p>
-              </div>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                {classTypes.map((cls) => (
-                  <div
-                    key={cls.id}
-                    onClick={() => setSelectedClass(cls)}
-                    className={`relative cursor-pointer rounded-2xl border-2 p-5 transition-all ${cls.color} ${selectedClass?.id === cls.id ? 'ring-4 ring-purple-600/20 border-purple-600 bg-purple-50' : ''}`}
+        {step === 1 && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <h1 className="mb-2 text-3xl font-extrabold text-slate-900">Select a Class</h1>
+            <p className="mb-8 font-medium text-slate-500">Choose the duration that fits your needs.</p>
+            
+            <div className="grid gap-4 sm:grid-cols-2">
+              {products.length === 0 ? (
+                <div className="col-span-full rounded-3xl border-2 border-slate-200 bg-white p-8 text-center">
+                  <p className="text-lg font-bold text-slate-500">No classes available at the moment.</p>
+                  <p className="text-sm text-slate-400">Please check back later or contact the teacher.</p>
+                </div>
+              ) : (
+                products.map((product) => (
+                  <button
+                    key={product.id}
+                    onClick={() => {
+                      setSelectedClass(product);
+                      setStep(2);
+                    }}
+                    className="flex flex-col items-start rounded-3xl border-2 border-slate-200 bg-white p-6 text-left transition-all hover:border-purple-600 hover:shadow-md focus:border-purple-600 focus:outline-none"
                   >
-                    {cls.popular && (
-                      <span className="absolute -top-3 right-4 rounded-full bg-purple-600 px-3 py-0.5 text-xs font-bold text-white">
-                        Popular
+                    <div className="mb-4 flex w-full items-center justify-between">
+                      <span className="rounded-full bg-purple-100 px-3 py-1 text-xs font-bold text-purple-700">
+                        {product.duration_min} Min
                       </span>
-                    )}
-                    <div className="mb-4 flex items-center justify-between">
-                      <div className="rounded-xl bg-white p-2 shadow-sm">{cls.icon}</div>
-                      <div className="text-right">
-                        <div className="text-xl font-black text-slate-900">
-                          {cls.price === 0 ? "Free" : `${cls.price} ${cls.currency}`}
-                        </div>
-                        {cls.note && <div className="text-xs font-bold text-slate-500">{cls.note}</div>}
-                      </div>
+                      <span className="text-xl font-extrabold text-slate-900">
+                        {product.price === 0 ? "Free" : `€${product.price}`}
+                      </span>
                     </div>
-                    <h3 className="font-bold text-slate-900">{cls.name}</h3>
-                    <p className="text-sm font-medium text-slate-500">{cls.duration} minutes</p>
-                  </div>
+                    <h3 className="mb-1 text-lg font-bold text-slate-900">{product.name}</h3>
+                    <p className="text-sm font-medium text-slate-500">{product.description}</p>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+
+        {step === 2 && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <h1 className="mb-2 text-3xl font-extrabold text-slate-900">Select Date & Time</h1>
+            <p className="mb-8 font-medium text-slate-500">When would you like to have your {selectedClass?.duration_min}-min class?</p>
+            
+            <div className="mb-6">
+              <h3 className="mb-4 flex items-center gap-2 font-bold text-slate-700">
+                <Calendar className="h-5 w-5 text-purple-600" /> Choose a Day
+              </h3>
+              <div className="flex gap-3 overflow-x-auto pb-4 scrollbar-hide">
+                {getNextDays().map((day, index) => (
+                  <button
+                    key={index}
+                    onClick={() => {
+                      setSelectedDateIndex(index);
+                      setSelectedTime(null);
+                    }}
+                    className={`flex min-w-[80px] flex-col items-center justify-center rounded-2xl border-2 p-4 transition-all ${
+                      selectedDateIndex === index
+                        ? "border-purple-600 bg-purple-50 text-purple-700"
+                        : "border-slate-200 bg-white text-slate-600 hover:border-purple-300"
+                    }`}
+                  >
+                    <span className="text-xs font-bold uppercase">{day.day}</span>
+                    <span className="text-2xl font-extrabold">{day.date}</span>
+                  </button>
                 ))}
               </div>
+            </div>
 
-              <button
-                onClick={handleNext}
-                disabled={!selectedClass}
-                className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl border-b-4 border-purple-700 bg-purple-600 px-6 py-4 font-bold text-white transition-all hover:translate-y-[2px] hover:border-b-2 active:translate-y-[4px] active:border-b-0 disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-b-4"
-              >
-                Continue <ChevronRight className="h-5 w-5" />
-              </button>
-            </motion.div>
-          )}
-
-          {/* STEP 2: Select Date & Time */}
-          {step === 2 && (
-            <motion.div
-              key="step2"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="flex flex-col gap-8"
-            >
-              <div>
-                <h1 className="text-3xl font-extrabold text-slate-900">Pick a time</h1>
-                <p className="mt-2 font-medium text-slate-500">When would you like to have your {selectedClass?.duration}-min class?</p>
-              </div>
-
-              {/* Date Selector */}
-              <div>
-                <h3 className="mb-4 font-bold text-slate-700 flex items-center gap-2"><CalendarIcon className="h-5 w-5 text-purple-500"/> Select Date</h3>
-                <div className="flex gap-3 overflow-x-auto pb-4 scrollbar-hide">
-                  {getNextDays().map((day, i) => (
-                    <button
-                      key={i}
-                      onClick={() => setSelectedDate(i)}
-                      className={`flex min-w-[80px] flex-col items-center justify-center rounded-2xl border-2 p-4 transition-all ${selectedDate === i ? 'border-purple-600 bg-purple-600 text-white shadow-md' : 'border-slate-200 bg-white text-slate-600 hover:border-purple-300'}`}
-                    >
-                      <span className="text-sm font-bold uppercase opacity-80">{day.dayName}</span>
-                      <span className="text-2xl font-black">{day.dateNum}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Time Selector */}
-              <div className={`transition-opacity ${selectedDate !== null ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
-                <h3 className="mb-4 font-bold text-slate-700 flex items-center gap-2"><Clock className="h-5 w-5 text-purple-500"/> Select Time (Your Local Timezone)</h3>
-                <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
-                  {availableTimes.map((time) => (
-                    <button
-                      key={time}
-                      onClick={() => setSelectedTime(time)}
-                      className={`rounded-xl border-2 py-3 font-bold transition-all ${selectedTime === time ? 'border-purple-600 bg-purple-50 text-purple-700 ring-2 ring-purple-600/20' : 'border-slate-200 bg-white text-slate-600 hover:border-purple-300'}`}
-                    >
-                      {time}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                onClick={handleNext}
-                disabled={selectedDate === null || selectedTime === null}
-                className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl border-b-4 border-purple-700 bg-purple-600 px-6 py-4 font-bold text-white transition-all hover:translate-y-[2px] hover:border-b-2 active:translate-y-[4px] active:border-b-0 disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:border-b-4"
-              >
-                Review Booking <ChevronRight className="h-5 w-5" />
-              </button>
-            </motion.div>
-          )}
-
-          {/* STEP 3: Confirm */}
-          {step === 3 && (
-            <motion.div
-              key="step3"
-              initial={{ opacity: 0, x: 20 }}
-              animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -20 }}
-              className="flex flex-col gap-6"
-            >
-              <div className="text-center">
-                <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-emerald-100">
-                  <CheckCircle2 className="h-10 w-10 text-emerald-600" />
-                </div>
-                <h1 className="text-3xl font-extrabold text-slate-900">Almost there!</h1>
-                <p className="mt-2 font-medium text-slate-500">Review your booking details below.</p>
-              </div>
-
-              {error && (
-                <div className="flex items-center gap-3 rounded-2xl border-2 border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
-                  <AlertCircle className="h-5 w-5 shrink-0" />
-                  <p>{error}</p>
-                </div>
-              )}
-
-              <div className="overflow-hidden rounded-3xl border-2 border-slate-200 bg-white shadow-sm">
-                <div className="border-b-2 border-slate-100 bg-slate-50 p-6">
-                  <h3 className="font-bold text-slate-500 uppercase tracking-wider text-xs mb-1">Class Type</h3>
-                  <div className="text-xl font-black text-slate-900">{selectedClass?.name}</div>
-                </div>
-                <div className="flex items-center gap-4 border-b-2 border-slate-100 p-6">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-100 text-purple-600">
-                    <CalendarIcon className="h-6 w-6" />
+            {selectedDateIndex !== null && (
+              <div className="animate-in fade-in duration-300">
+                <h3 className="mb-4 flex items-center gap-2 font-bold text-slate-700">
+                  <Clock className="h-5 w-5 text-purple-600" /> Choose a Time
+                </h3>
+                {getAvailableTimesForDate(selectedDateIndex).length === 0 ? (
+                  <div className="rounded-2xl border-2 border-slate-200 bg-white p-8 text-center font-medium text-slate-500">
+                    No available times for this date. Please select another day.
                   </div>
-                  <div>
-                    <h3 className="font-bold text-slate-500 uppercase tracking-wider text-xs mb-1">Date & Time</h3>
-                    <div className="font-bold text-slate-900">
-                      {selectedDate !== null && getNextDays()[selectedDate].fullDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} at {selectedTime}
-                    </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-3 sm:grid-cols-4">
+                    {getAvailableTimesForDate(selectedDateIndex).map((time, index) => (
+                      <button
+                        key={index}
+                        onClick={() => setSelectedTime(time)}
+                        className={`rounded-xl border-2 py-3 text-center font-bold transition-all ${
+                          selectedTime === time
+                            ? "border-purple-600 bg-purple-600 text-white"
+                            : "border-slate-200 bg-white text-slate-700 hover:border-purple-300"
+                        }`}
+                      >
+                        {time}
+                      </button>
+                    ))}
                   </div>
+                )}
+              </div>
+            )}
+
+            <div className="mt-12 flex gap-4">
+              <button
+                onClick={() => setStep(1)}
+                className="rounded-xl border-2 border-slate-200 bg-white px-6 py-4 font-bold text-slate-600 transition-all hover:bg-slate-50"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => setStep(3)}
+                disabled={selectedDateIndex === null || !selectedTime}
+                className="flex-1 rounded-xl bg-purple-600 px-6 py-4 font-bold text-white transition-all hover:bg-purple-700 disabled:opacity-50"
+              >
+                Continue to Review
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <h1 className="mb-2 text-3xl font-extrabold text-slate-900">Review & Confirm</h1>
+            <p className="mb-8 font-medium text-slate-500">Double check your class details before confirming.</p>
+            
+            <div className="mb-8 overflow-hidden rounded-3xl border-2 border-slate-200 bg-white shadow-sm">
+              <div className="border-b-2 border-slate-100 bg-slate-50 p-6">
+                <h3 className="font-bold text-slate-900">{selectedClass?.name}</h3>
+                <p className="text-sm font-medium text-slate-500">{selectedClass?.duration_min} Minutes</p>
+              </div>
+              <div className="p-6">
+                <div className="mb-4 flex items-center justify-between">
+                  <span className="font-medium text-slate-500">Date</span>
+                  <span className="font-bold text-slate-900">
+                    {selectedDateIndex !== null && getNextDays()[selectedDateIndex].fullDate.toLocaleDateString()}
+                  </span>
                 </div>
-                <div className="flex items-center justify-between bg-slate-50 p-6">
-                  <span className="font-bold text-slate-600">Total Due</span>
-                  <span className="text-2xl font-black text-slate-900">
-                    {selectedClass?.price === 0 ? "Free" : `${selectedClass?.price} ${selectedClass?.currency}`}
+                <div className="mb-4 flex items-center justify-between">
+                  <span className="font-medium text-slate-500">Time</span>
+                  <span className="font-bold text-slate-900">{selectedTime}</span>
+                </div>
+                <div className="mt-6 flex items-center justify-between border-t-2 border-slate-100 pt-4">
+                  <span className="font-bold text-slate-900">Total</span>
+                  <span className="text-2xl font-extrabold text-purple-600">
+                    {selectedClass?.price === 0 ? "Free" : `€${selectedClass?.price}`}
                   </span>
                 </div>
               </div>
+            </div>
 
-              {selectedClass?.price === 0 ? (
-                <button
-                  onClick={handleConfirmFreeBooking}
-                  disabled={isSubmitting}
-                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-2xl border-b-4 border-emerald-700 bg-emerald-600 px-6 py-4 font-bold text-white transition-all hover:translate-y-[2px] hover:border-b-2 active:translate-y-[4px] active:border-b-0 disabled:opacity-70 disabled:hover:translate-y-0 disabled:hover:border-b-4"
-                >
-                  {isSubmitting ? <Loader2 className="h-6 w-6 animate-spin" /> : <>Confirm Booking <CheckCircle2 className="h-5 w-5" /></>}
-                </button>
-              ) : (
-                <div className="mt-4">
-                  {isSubmitting ? (
-                    <div className="flex justify-center p-4">
-                      <Loader2 className="h-8 w-8 animate-spin text-purple-600" />
-                    </div>
-                  ) : (
-                    <PayPalScriptProvider options={{ clientId: process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || "test", currency: selectedClass.currency }}>
-                      <PayPalButtons
-                        style={{ layout: "vertical", shape: "rect", color: "gold" }}
-                        createOrder={(data, actions) => {
-                          return actions.order.create({
-                            intent: "CAPTURE",
-                            purchase_units: [
-                              {
-                                description: selectedClass.name,
-                                amount: {
-                                  currency_code: selectedClass.currency,
-                                  value: selectedClass.price.toString(),
-                                },
-                              },
-                            ],
-                          });
-                        }}
-                        onApprove={handlePayPalApprove}
-                        onError={(err) => {
-                          console.error(err);
-                          setError("PayPal encountered an error. Please try again.");
-                        }}
-                      />
-                    </PayPalScriptProvider>
-                  )}
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {/* STEP 4: Success */}
-          {step === 4 && (
-            <motion.div
-              key="step4"
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              className="flex flex-col items-center justify-center gap-6 text-center py-12"
-            >
-              <div className="flex h-24 w-24 items-center justify-center rounded-full bg-emerald-100">
-                <CheckCircle2 className="h-12 w-12 text-emerald-600" />
-              </div>
-              <div>
-                <h1 className="text-4xl font-extrabold text-slate-900">Booking Confirmed!</h1>
-                <p className="mt-4 text-lg font-medium text-slate-500">
-                  Your class has been successfully scheduled. You'll receive an email confirmation shortly.
-                </p>
-              </div>
-              <Link
-                href="/dashboard"
-                className="mt-8 flex items-center justify-center gap-2 rounded-2xl border-b-4 border-purple-700 bg-purple-600 px-8 py-4 font-bold text-white transition-all hover:translate-y-[2px] hover:border-b-2 active:translate-y-[4px] active:border-b-0"
+            {selectedClass?.price === 0 ? (
+              <button
+                onClick={handleBookFreeClass}
+                disabled={isBooking}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-purple-600 px-6 py-4 font-bold text-white transition-all hover:bg-purple-700 disabled:opacity-70"
               >
-                Go to Dashboard
-              </Link>
-            </motion.div>
-          )}
-        </AnimatePresence>
+                {isBooking ? <Loader2 className="h-5 w-5 animate-spin" /> : "Confirm Free Booking"}
+              </button>
+            ) : (
+              <div className="rounded-3xl border-2 border-slate-200 bg-white p-6 shadow-sm">
+                <h3 className="mb-4 flex items-center gap-2 font-bold text-slate-700">
+                  <CreditCard className="h-5 w-5 text-purple-600" /> Payment
+                </h3>
+                <PayPalScriptProvider options={{ clientId: process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID || "test", currency: "EUR" }}>
+                  <PayPalButtons
+                    style={{ layout: "vertical", shape: "rect", color: "black" }}
+                    createOrder={(data, actions) => {
+                      return actions.order.create({
+                        intent: "CAPTURE",
+                        purchase_units: [
+                          {
+                            amount: {
+                              currency_code: "EUR",
+                              value: selectedClass.price.toString(),
+                            },
+                            description: `${selectedClass.name} - ${selectedClass.duration_min} Min`,
+                          },
+                        ],
+                      });
+                    }}
+                    onApprove={handlePayPalApprove}
+                  />
+                </PayPalScriptProvider>
+              </div>
+            )}
+
+            <button
+              onClick={() => setStep(2)}
+              className="mt-6 w-full text-center font-bold text-slate-500 hover:text-slate-700"
+            >
+              Go Back
+            </button>
+          </div>
+        )}
       </main>
     </div>
   );
