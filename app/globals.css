@@ -1,1 +1,49 @@
 @import "tailwindcss";
+
+@theme inline {
+  --color-background: #fefefe;
+  --color-foreground: #3d3d3d;
+  
+  /* Brand pastels */
+  --color-mint: #c8e6d5;
+  --color-mint-light: #e8f5ed;
+  --color-yellow: #fef3c7;
+  --color-yellow-light: #fef9e7;
+  --color-lavender: #e8dff5;
+  --color-lavender-light: #f5f0fa;
+  --color-blush: #fce4e4;
+  --color-blush-light: #fef5f5;
+  --color-sky: #dbeafe;
+  --color-sky-light: #eff6ff;
+  
+  /* Semantic colors */
+  --color-primary: #f8b4b4;
+  --color-primary-foreground: #3d3d3d;
+  --color-secondary: #c8e6d5;
+  --color-secondary-foreground: #3d3d3d;
+  --color-accent: #e8dff5;
+  --color-accent-foreground: #3d3d3d;
+  --color-muted: #f5f5f5;
+  --color-muted-foreground: #737373;
+  
+  --color-card: #ffffff;
+  --color-card-foreground: #3d3d3d;
+  --color-border: #e8dff5;
+  
+  --radius: 1rem;
+  
+  --font-sans: var(--font-poppins), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-fredoka), ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: linear-gradient(
+    135deg,
+    var(--color-mint-light) 0%,
+    var(--color-background) 25%,
+    var(--color-lavender-light) 50%,
+    var(--color-background) 75%,
+    var(--color-blush-light) 100%
+  );
+  min-height: 100vh;
+}
